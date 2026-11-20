@@ -56,6 +56,14 @@ const cacheBust = () => '?t=' + Math.floor(Date.now() / 60000);
 async function getJSON(p) { const r = await fetch(p + cacheBust()); if (!r.ok) throw new Error('Données introuvables (' + r.status + ')'); return r.json(); }
 const sumSince = (rows, f, sinceMs) => { let s = 0, k = 0; for (const r of rows || []) if (+new Date(r.ts) >= sinceMs && r[f] != null) { s += r[f]; k++; } return k ? s : null; };
 const last = (rows, f) => { for (let i = (rows || []).length - 1; i >= 0; i--) if (rows[i][f] != null) return { value: rows[i][f], ts: rows[i].ts }; return { value: null, ts: null }; };
+// joueurs en jeu : la dernière valeur seulement si elle est récente, sinon « moins de 5 » (Epic masque les petits chiffres)
+function liveOf(rows) {
+  rows = rows || []; if (!rows.length) return { value: null, ts: null, low: false };
+  const l = last(rows, 'peakCCU'), end = +new Date(rows[rows.length - 1].ts);
+  if (l.ts && end - +new Date(l.ts) <= 40 * 60000) return { ...l, low: false };
+  return { value: null, ts: rows[rows.length - 1].ts, low: true };
+}
+const liveText = (lv, suffix = '') => lv.low ? '< 5' + suffix : lv.value == null ? '—' : n(lv.value) + suffix;
 async function loadAll() {
   const cfg = await getJSON('data/islands.json');
   const status = await getJSON('data/status.json').catch(() => ({ islands: [] }));
@@ -109,7 +117,7 @@ function barHeights(list) { const max = Math.max(...list.map(m => m.amount), 1);
 async function viewDashboard() {
   const { islands, status } = await loadAll();
   const es = earningsSummary(); const now = Date.now();
-  const rows = islands.map(i => ({ ...i, live: last(i.minute, 'peakCCU'), unique7: sumSince(i.day, 'uniquePlayers', now - 7.5 * 864e5), money: es.byCode[i.code] || 0 }));
+  const rows = islands.map(i => ({ ...i, live: liveOf(i.minute), unique7: sumSince(i.day, 'uniquePlayers', now - 7.5 * 864e5), money: es.byCode[i.code] || 0 }));
   const liveTotal = rows.reduce((s, i) => s + (i.live.value || 0), 0), unique7 = rows.reduce((s, i) => s + (i.unique7 || 0), 0);
   render(`<div class="app">
     <div class="row between">
@@ -122,7 +130,7 @@ async function viewDashboard() {
       <span class="small" style="color:#E6DFFF">${es.total ? 'Total depuis le début : ' + money(es.total) : 'Touche pour ajouter tes gains'}</span>
     </a>
     <div class="grid2">
-      <div class="card tile col" style="gap:4px"><span class="xs muted">Joueurs en ce moment</span><span class="num">${n(liveTotal)}</span></div>
+      <div class="card tile col" style="gap:4px"><span class="xs muted">Joueurs en ce moment</span><span class="num">${!liveTotal && rows.some(i => i.live.low) ? '< 5' : n(liveTotal)}</span></div>
       <div class="card tile col" style="gap:4px"><span class="xs muted">Joueurs sur 7 j</span><span class="num">${n(unique7)}</span></div>
     </div>
     <span class="section">Tes îles</span>
@@ -130,7 +138,7 @@ async function viewDashboard() {
       ${rows.map(i => `<a class="island" href="#/map/${esc(i.code)}">
         <div class="thumb" style="background:${colorFor(i.code)};box-shadow:0 0 12px ${colorFor(i.code)}">${esc(String(i.title || '?').trim()[0].toUpperCase())}</div>
         <div class="grow col" style="gap:3px"><strong class="ellipsis">${esc(i.title)}</strong><span class="xs dim">${esc(i.code)}</span>${i.error ? `<span class="xs err">${esc(i.error)}</span>` : ''}</div>
-        <div class="col right" style="gap:3px;align-items:flex-end"><strong style="color:var(--cyan)">${i.live.value == null ? '—' : n(i.live.value) + ' en jeu'}</strong><span class="xs" style="color:var(--lime)">${i.money ? '+' + money(i.money) : ''}</span></div>
+        <div class="col right" style="gap:3px;align-items:flex-end"><strong style="color:var(--cyan)">${liveText(i.live, ' en jeu')}</strong><span class="xs" style="color:var(--lime)">${i.money ? '+' + money(i.money) : ''}</span></div>
       </a>`).join('')}
     </div>
     <p class="xs dim" style="text-align:center">Stats publiques Epic · mises à jour ${status.updatedAt ? esc(ago(status.updatedAt)) : 'bientôt (première collecte en cours)'}.<br>Moins de 5 joueurs = pas de chiffre (règle d’Epic).</p>
@@ -144,7 +152,7 @@ async function viewMap(code) {
   const d = await getJSON(`data/island-${code}.json`);
   const now = Date.now(), col = colorFor(code), es = earningsSummary();
   const series = chartRange === '24h' ? d.minute : chartRange === '7d' ? (d.hour || []).filter(r => +new Date(r.ts) >= now - 7 * 864e5) : chartRange === '30d' ? (d.day || []).filter(r => +new Date(r.ts) >= now - 30 * 864e5) : d.day;
-  const live = last(d.minute, 'peakCCU'), since = now - 7.5 * 864e5;
+  const live = liveOf(d.minute), since = now - 7.5 * 864e5;
   const k = { plays7: sumSince(d.day, 'plays', since), unique7: sumSince(d.day, 'uniquePlayers', since), minutes7: sumSince(d.day, 'minutesPlayed', since), avg: last(d.day, 'averageMinutesPerPlayer').value, d1: last(d.day, 'd1').value, d7: last(d.day, 'd7').value, fav7: sumSince(d.day, 'favorites', since), rec7: sumSince(d.day, 'recommendations', since) };
   const mine = es.list.filter(e => e.code === code);
   const byMonth = Object.entries(mine.reduce((a, e) => (a[e.month] = (a[e.month] || 0) + e.amount, a), {})).sort().map(([month, amount]) => ({ month, amount }));
@@ -156,8 +164,8 @@ async function viewMap(code) {
       <div class="grow col" style="gap:2px"><h1 class="display ellipsis" style="font-size:26px">${esc(d.title || code)}</h1><span class="xs dim">${esc(code)}</span></div>
     </div>
     <div class="card cyan col" style="gap:10px">
-      <div class="row between"><span class="small muted" style="font-weight:600">Joueurs en jeu</span><span class="pill live" style="padding:0;border:none"><span class="dot ${live.value == null ? 'off' : ''}"></span>${live.ts ? esc(ago(live.ts)) : 'pas de donnée'}</span></div>
-      <span class="big cyan">${n(live.value)}</span>
+      <div class="row between"><span class="small muted" style="font-weight:600">Joueurs en jeu</span><span class="pill live" style="padding:0;border:none"><span class="dot ${live.value == null && !live.low ? 'off' : ''}"></span>${live.ts ? esc(ago(live.ts)) : 'pas de donnée'}</span></div>
+      <span class="big cyan">${liveText(live)}</span>${live.low ? '<span class="xs dim">Moins de 5 joueurs en ce moment : Epic n’affiche pas le chiffre exact.</span>' : ''}
       <div class="chips" role="group" aria-label="Indicateur">${Object.entries(METRICS).map(([key, l]) => `<button class="chip ${chartMetric === key ? 'on' : ''}" data-metric="${key}">${l}</button>`).join('')}</div>
       <svg class="chart" id="chart" viewBox="0 0 320 150" preserveAspectRatio="none" role="img" aria-label="Évolution ${esc(METRICS[chartMetric])}"></svg>
       <div class="tip" id="tip"></div>
